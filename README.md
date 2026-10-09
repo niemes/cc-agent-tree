@@ -8,9 +8,9 @@
 
 Python 3.10+ · Linux / macOS (WSL works) · zero dependencies · no network · read-only
 
-![Agent Tree watching a live Claude Code session with three subagents](assets/screenshot.png)
+![Agent Tree in demo mode, with three subagents](assets/screenshot.png)
 
-<sub>A real capture: Agent Tree watching the session that wrote this README.</sub>
+<sub>`--demo` mode: synthetic events, not a live run.</sub>
 
 ## Quick start
 
@@ -48,7 +48,7 @@ It writes ids, tool names and short paths (never prompts, code or output) to `~/
 - The bus between cards means "same session", not a verified parent/child tree.
 - "Recorded tokens" come from message usage. They are not billing.
 - Claude's transcript format is internal and can change.
-- The screenshot is transcript-only. Hook mode is covered by tests, not shown live.
+- The screenshot is `--demo` (synthetic events). Hook mode is covered by tests, not shown live.
 
 ## Tests
 
