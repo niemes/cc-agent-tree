@@ -55,3 +55,7 @@ It writes ids, tool names and short paths (never prompts, code or output) to `~/
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
