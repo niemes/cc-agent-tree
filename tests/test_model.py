@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from model import Tail, State, Session, Watcher, discover, clean
-from ui import render, Canvas, picker
+from ui import render, Canvas, picker, solo, dither, SPINNER
 
 
 class ObserverTests(unittest.TestCase):
@@ -107,6 +107,82 @@ class ObserverTests(unittest.TestCase):
         for w,h in [(60,20),(84,40),(100,42),(124,48),(180,60)]:
             c=render(w,h,state=s,session=session,selected=15,show_inactive=True)
             self.assertEqual(len(c.cells),h);self.assertTrue(all(len(r)==w for r in c.cells))
+
+    def test_dither_has_a_hard_edge(self):
+        for width in (1,5,13):
+            for fill in range(1,width+1):
+                lit,track=dither(fill,width)
+                self.assertEqual(len(lit),fill);self.assertEqual(len(lit)+len(track),width)
+                self.assertFalse(set(lit+track)&set('░▒▓▟'))
+
+    def test_tool_record_keeps_detail_timing_and_failure(self):
+        s=State()
+        s.transcript({'uuid':'a','timestamp':'2026-01-01T00:00:00Z','message':{'content':[{'type':'tool_use','id':'t1','name':'Bash','input':{'command':'npm test'}}]}})
+        s.transcript({'uuid':'b','timestamp':'2026-01-01T00:00:02.500Z','message':{'content':[{'type':'tool_result','tool_use_id':'t1','is_error':True}]}})
+        t=s.tools['t1'];self.assertEqual(t['detail'],'npm test');self.assertTrue(t['failed']);self.assertAlmostEqual(t['end']-t['start'],2.5)
+
+    def solo_states(self):
+        def working(n):
+            s=State()
+            for i in range(n):s.start_tool('main',f't{i}','Bash',{'command':f'npm test -- case{i}'},True)
+            return s
+        idle=State()
+        for i,name in enumerate(('Read','Grep')):idle.start_tool('main',f'i{i}',name,{'file_path':'src/auth.ts'},True);idle.finish_tool(f'i{i}',False,True)
+        idle.hook({'hook_event_name':'Stop'})
+        failed=working(1);failed.finish_tool('t0',True,True)
+        approval=working(1);approval.hook({'hook_event_name':'PermissionRequest'})
+        long=State();long.start_tool('main','l','mcp__'+'n'*200,{'file_path':'/'+'p/'*200},True)
+        return {'idle':(idle,'✓ Read'),'one':(working(1),'1 in flight'),'three':(working(3),'3 in flight'),'failed':(failed,'× Bash'),
+                'approval':(approval,'approval'),'empty':(State(),'Waiting for the first tool call'),'long':(long,'mcp__nnnn')}
+
+    def solo_box(self,c):
+        lines=[''.join(cell[0] for cell in row) for row in c.cells]
+        top=next(y for y,l in enumerate(lines) if 'MAIN AGENT · TOOL TAPE' in l)
+        bottom=next(y for y in range(top+1,c.h) if lines[y][c.w-3]=='┘')
+        for y in range(top+1,bottom):self.assertEqual(lines[y][c.w-3],'╎',f'row {y} overruns the box')
+        self.assertEqual(lines[top][c.w-3],'┐')
+        self.assertLess(bottom,next(y for y,l in enumerate(lines) if 'session log' in l))
+        return top,bottom,'\n'.join(lines)
+
+    def test_solo_view_renders_every_state(self):
+        session=Session('id',Path('/tmp/id.jsonl'),'project','title',0)
+        for w,h in [(84,40),(124,48)]:
+            for name,(s,expected) in self.solo_states().items():
+                c=render(w,h,state=s,session=session)
+                top,bottom,text=self.solo_box(c)
+                self.assertIn('No open subagents observed',text);self.assertIn(expected,text,name)
+                self.assertGreaterEqual(bottom-top+1,7);self.assertNotIn('OPEN AGENTS',text)
+                self.assertTrue(all(cell[2] is None for row in c.cells for cell in row))
+                if name=='long':self.assertNotIn('nnnnn','\n'.join(text.split('\n')[top:bottom+1]))
+        self.assertIn('No subagents observed in this session',self.solo_box(render(124,48,state=State(),session=session,show_inactive=True))[2])
+
+    def test_solo_view_fits_between_tools_and_log_at_any_size(self):
+        session=Session('id',Path('/tmp/id.jsonl'),'project','title',0)
+        states=self.solo_states()
+        for w in (84,100,110,124,180):
+            for h in range(40,66):
+                for name in ('three','empty'):
+                    top,bottom,_=self.solo_box(render(w,h,state=states[name][0],session=session))
+                    self.assertGreaterEqual(bottom-top+1,7);self.assertLessEqual(bottom-top+1,18)
+
+    def test_solo_view_with_subagents_keeps_agent_layout(self):
+        s=State();s.hook({'hook_event_name':'SubagentStart','agent_id':'writer','agent_type':'writer'})
+        c=render(124,48,state=s,session=Session('id',Path('/tmp/id.jsonl'),'project','title',0))
+        text='\n'.join(''.join(cell[0] for cell in row) for row in c.cells)
+        self.assertIn('OPEN AGENTS',text);self.assertNotIn('TOOL TAPE',text)
+
+    def test_solo_animation_is_a_pure_function_of_the_clock(self):
+        s=State()
+        for tid in 'ab':s.start_tool('main',tid,'Bash',{'command':'sleep 9'},True)
+        for t in s.tools.values():t['start']=100.0
+        def draw(now,wall=103.5):
+            c=Canvas(60,12);solo(c,s,2,1,55,10,now,wall,'caption');return ''.join(cell[0] for row in c.cells for cell in row)
+        self.assertEqual(draw(0.0),draw(0.0));self.assertNotEqual(draw(0.0),draw(0.5))
+        self.assertIn('3.5s',draw(0.0));self.assertTrue(set(SPINNER)&set(draw(0.0)))
+        s.agents['main'].status='last seen'
+        stale=draw(0.0);self.assertIn('◌',stale);self.assertFalse(set(SPINNER)&set(stale));self.assertNotIn('3.5s',stale)
+        s.hook({'hook_event_name':'Stop'})
+        stopped=draw(0.0);self.assertNotIn('◌',stopped);self.assertNotIn('✓',stopped);self.assertNotIn('×',stopped);self.assertIn('·',stopped)
 
 
 if __name__=='__main__':unittest.main()

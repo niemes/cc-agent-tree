@@ -1,4 +1,6 @@
 """Cell-based true-colour renderer. No external dependencies."""
+from collections import Counter
+from itertools import islice
 import math
 import shutil
 import time
@@ -133,30 +135,98 @@ class Canvas:
         return ''.join(parts)+'</g></svg>'
 
 
+def dither(fill, width):
+    """Bar as (lit, track): 2-cell █▊ segments with a small gap, like an LCD bar graph, then a braille checkerboard."""
+    return ('█▊'*fill)[:fill], '⢕'*(width-fill)
+
+
+def gauge(seconds, width=13):
+    """Freshness meter: shorter the longer a session has been quiet."""
+    return dither(max(1, width - 3*sum(seconds > t for t in (30, 300, 3600, 86400))), width)
+
+
+SPINNER = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+
+
+def lapse(s):
+    return f'{s:.1f}s' if s < 10 else f'{s:.0f}s' if s < 100 else f'{int(s)//60}m{int(s)%60:02d}s' if s < 3600 else '>1h'
+
+
+def solo(c, state, x, y, w, h, now, wall, caption, paused=False):
+    """Main agent alone: a tape of its real tool calls (spinner, duration bar) and a per-second event heartbeat."""
+    main = state.agents['main']
+    busy = main.status == 'working' and not paused
+    tone = status_color(main)
+    ix, iw = x+2, w-4
+    bw = 12 if iw >= 70 else 8
+    bx = ix+iw-bw-7
+    c.box(x, y, w, h, role(main) if main.inflight else 'dim', 'MAIN AGENT · TOOL TAPE')
+    right = f'{len(main.inflight)} in flight' if main.inflight else main.status
+    c.text(ix+iw-len(right), y+1, right, tone, True)
+    c.text(ix, y+1, caption, 'dim', limit=iw-len(right)-2)
+    rows = list(islice(((i, t) for i, t in reversed(state.tools.items()) if t['agent'] == 'main'), h-4))[::-1]
+    # Only a tool still in flight while main is live has a running clock; Stop/boot leave stale ids behind.
+    spans = [max(0, t['end']-t['start']) if t['end'] else max(0, wall-t['start']) if busy and i in main.inflight else None for i, t in rows]
+    longest = max([d for d in spans if d is not None] + [2])
+    for k, ((tid, t), d) in enumerate(zip(rows, spans)):
+        ry = y+2+k; flying = tid in main.inflight
+        if flying:
+            glyph = SPINNER[int(now*8+k) % 10] if busy else '◆◇'[int(now*2) % 2] if main.status == 'approval' and not paused else '◌'
+            color = tone
+        else:
+            glyph, color = ('×', 'red') if t['failed'] else ('✓', 'green') if t['end'] else ('·', 'dim')
+        c.text(ix, ry, glyph, color, flying)
+        c.text(ix+2, ry, t['name'], 'text', limit=9)
+        c.text(ix+12, ry, t['detail'], 'muted', limit=bx-ix-13)
+        if d is not None:
+            lit, track = dither(max(1, min(bw, round(d/longest*bw))), bw)
+            hue = color if flying or t['failed'] else 'muted'
+            c.text(bx, ry, lit, hue); c.text(bx+len(lit), ry, track, 'dim')
+            c.text(ix+iw-6, ry, f'{lapse(d):>6}', hue)
+    if not rows:
+        mid = y+1+(h-2)//2
+        c.center(x, mid-1, w, 'Waiting for the first tool call', 'muted')
+        lit, track = dither(1+round((math.sin(int(now*4)*.4)+1)/2*23), 24)
+        c.text(x+(w-24)//2, mid+1, lit, tone); c.text(x+(w-24)//2+len(lit), mid+1, track, 'dim')
+    beats = Counter(int(now-t) for t, aid, _ in state.pulses if aid == 'main')
+    failed = {int(now-t) for t, aid, st in state.pulses if aid == 'main' and st == 'failed'}
+    c.text(ix, y+h-2, 'pulse', 'dim')
+    for i in range(iw-7):
+        ago = iw-8-i
+        c.text(ix+7+i, y+h-2, '▁▂▃▄▅▆▇█'[min(7, beats[ago])], 'red' if ago in failed else 'green' if beats[ago] else 'dim')
+
+
 def picker(c, sessions, index, query, config):
-    c.text(3,2,'AGENT TREE', 'text', True)
-    c.text(17,2,'/ choose a Claude Code session', 'muted')
-    c.text(3,4,'LOCAL OBSERVER', 'green', True)
-    c.text(3,5,'Attach a view. Keep working in your usual Claude terminal.', 'muted')
-    c.box(2,7,c.w-4,3,'purple')
-    c.text(4,8,'/ '+query+('▌' if int(time.monotonic()*2)%2 else ' '),'purple')
-    c.text(4,11,'PROJECT / SESSION','muted')
-    c.text(c.w-24,11,'LAST UPDATED','muted')
-    visible=max(1,(c.h-17)//3)
+    c.text(2,1,'CLAUDE CODE / AGENT TREE','text',True)
+    c.text(c.w-39,1,'● LOCAL OBSERVER','green',True)
+    c.text(2,2,'choose a Claude Code session','muted')
+    c.text(c.w-39,2,f'{len(sessions)} sessions','dim')
+    c.text(2,3,'Attach a view. Keep working in your usual Claude terminal.','dim')
+    c.box(2,5,c.w-4,3,'purple')
+    c.text(4,6,'/ '+query+('▌' if int(time.monotonic()*2)%2 else ' '),'purple')
+    gx=c.w-18
+    c.text(4,9,'PROJECT / SESSION','muted')
+    c.text(gx-9,9,'LAST UPDATED','muted')
+    visible=max(1,(c.h-13)//4)
     start=max(0,min(index-visible//2,max(0,len(sessions)-visible)))
     for offset,s in enumerate(sessions[start:start+visible]):
-        n=start+offset; y=13+offset*3; selected=n==index
-        c.text(4,y,'◆' if selected else '·','purple' if selected else 'dim')
-        c.text(7,y,s.project,'text' if selected else 'muted',selected,limit=c.w-33)
-        c.text(c.w-24,y,age(max(0,time.time()-s.modified)),'green' if time.time()-s.modified<30 else 'muted')
-        c.text(7,y+1,s.title,'muted',limit=c.w-31)
-        c.text(c.w-24,y+1,s.id[:12],'dim')
+        n=start+offset; y=10+offset*4; selected=n==index
+        seconds=max(0,time.time()-s.modified); fresh=seconds<30
+        c.box(2,y,c.w-4,4,'purple' if selected else 'dim')
+        c.text(4,y+1,'◆' if selected else '·','purple' if selected else 'dim')
+        c.text(7,y+1,s.project,'text' if selected else 'muted',selected,limit=gx-18)
+        c.text(gx-9,y+1,age(seconds),'green' if fresh else 'muted')
+        lit,track=gauge(seconds)
+        c.text(gx,y+1,lit,'green' if fresh else 'muted')
+        c.text(gx+len(lit),y+1,track,'dim')
+        c.text(7,y+2,s.title,'muted',limit=gx-9)
+        c.text(gx,y+2,s.id[:12],'dim')
     if not sessions:
-        c.text(4,14,'No matching sessions yet.', 'orange')
-        c.text(4,16,'Start Claude Code locally, or press d for the animated demo.', 'muted',limit=c.w-8)
-        c.text(4,18,str(config / 'projects'),'dim',limit=c.w-8)
+        c.text(4,11,'No matching sessions yet.', 'orange')
+        c.text(4,13,'Start Claude Code locally, or press d for the animated demo.', 'muted',limit=c.w-8)
+        c.text(4,15,str(config / 'projects'),'dim',limit=c.w-8)
     c.text(3,c.h-3,'↑↓ select   enter listen   type to filter   ctrl-u clear   d demo   esc quit','muted',limit=c.w-6)
-    c.text(3,c.h-2,f'{len(sessions)} sessions  ·  refreshes automatically  ·  timestamps do not prove a session is running','dim',limit=c.w-6)
+    c.text(3,c.h-2,'refreshes automatically  ·  timestamps do not prove a session is running','dim',limit=c.w-6)
 
 
 def dashboard(c,state,session,selected=0,paused=False,demo=False,detail=False,show_inactive=False):
@@ -221,14 +291,16 @@ def dashboard(c,state,session,selected=0,paused=False,demo=False,detail=False,sh
         y=ty+2+i; barw=max(4,tw-32); fill=max(1,round(count/maximum*barw))
         color='orange' if name in ('Edit','Write','Bash') else 'green'
         c.text(tx+2,y,name,'text',limit=15)
-        c.text(tx+19,y,'█'*max(0,fill-2)+'▒'*min(fill,2),color)
+        lit,track=dither(fill,barw)
+        c.text(tx+19,y,lit,color)
+        c.text(tx+19+len(lit),y,track,'dim')
         c.text(tx+tw-8,y,f'{count:>5}','muted')
     if not counts:
         c.text(tx+2,ty+3,'Waiting for the first observed tool call…','muted',limit=tw-4)
     # Session membership bus; not a claimed parent hierarchy.
-    if row_gap>=4:
-        c.text(graphx+2,label_y,'SESSION AGENTS' if show_inactive else 'OPEN AGENTS','green',True)
     children=agents[1:]
+    if children and row_gap>=4:
+        c.text(graphx+2,label_y,'SESSION AGENTS' if show_inactive else 'OPEN AGENTS','green',True)
     capacity=3 if graphw>=64 else 2
     page=0 if selected==0 else (selected-1)//capacity
     shown=children[page*capacity:(page+1)*capacity]
@@ -247,8 +319,7 @@ def dashboard(c,state,session,selected=0,paused=False,demo=False,detail=False,sh
                 c.center(x,cardy+4,cardw,a.action,'muted')
             c.center(x,cardy+cardh-2,cardw,('✓ ' if a.status=='complete' else '× ' if a.status=='failed' else '')+a.status,status_color(a))
     else:
-        c.center(graphx,cardy+2,graphw,'No subagents observed in this session' if show_inactive else 'No open subagents observed','muted')
-        c.center(graphx,cardy+4,graphw,'Tool activity appears above as Claude works.' if show_inactive else 'Press i to include inactive / unknown agents.','dim')
+        solo(c,state,graphx,ty+7,graphw,min(18,graphbottom-ty-6),now,time.time(),'No subagents observed in this session' if show_inactive else 'No open subagents observed',paused)
     if shown and show_return:
         for i,a in enumerate(shown):
             x=graphx+i*(cardw+gap)+cardw//2

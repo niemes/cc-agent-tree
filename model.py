@@ -163,7 +163,8 @@ class State:
         a = self.agent(aid)
         inp = inp if isinstance(inp, dict) else {}
         detail = inp.get('file_path') or inp.get('command') or inp.get('pattern') or inp.get('description') or inp.get('query') or ''
-        self.tools[tid] = {'agent': aid, 'name': name, 'done': False}
+        self.tools[tid] = {'agent': aid, 'name': name, 'done': False, 'detail': clean(detail, 120),
+                           'start': self.event_stamp or time.time(), 'end': None, 'failed': False}
         self.counts[name] += 1
         a.calls += 1
         a.inflight.add(tid)
@@ -176,7 +177,7 @@ class State:
         tool = self.tools.get(tid)
         if not tool or tool['done']:
             return
-        tool['done'] = True
+        tool['done'], tool['failed'], tool['end'] = True, bool(failed), self.event_stamp or time.time()
         a = self.agent(tool['agent'])
         if live and not a.stopped:
             a.session_open = True

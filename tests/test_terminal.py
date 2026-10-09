@@ -35,6 +35,15 @@ class TerminalTests(unittest.TestCase):
                 if text.encode() in data:return data
         self.fail(f'Missing terminal output: {text}')
 
+    def wait_exit(self,fd,p,timeout=4):
+        # Drain like a real terminal: an unread frame can block the app's write before it sees the key.
+        deadline=time.monotonic()+timeout
+        while p.poll() is None and time.monotonic()<deadline:
+            if select.select([fd],[],[],0.05)[0]:
+                try:os.read(fd,262144)
+                except OSError:break
+        p.wait(timeout=1)
+
     def test_demo_switch_back_and_clean_exit(self):
         fd,p=self.launch('--demo')
         self.read_until(fd,'AGENT TREE')
@@ -42,7 +51,7 @@ class TerminalTests(unittest.TestCase):
         os.write(fd,b's')
         self.read_until(fd,'choose a Claude Code session')
         os.write(fd,b'\x1b')
-        p.wait(timeout=4);self.assertEqual(p.returncode,0)
+        self.wait_exit(fd,p);self.assertEqual(p.returncode,0)
 
     def test_select_session_then_observe_live_append(self):
         with tempfile.TemporaryDirectory() as d:
@@ -55,7 +64,7 @@ class TerminalTests(unittest.TestCase):
             with transcript.open('a') as f:
                 f.write(json.dumps({'uuid':'tool-row','message':{'model':'claude-sonnet','content':[{'type':'tool_use','id':'live1','name':'Bash','input':{'command':'unique-live-command'}}]}})+'\n')
             self.read_until(fd,'unique-live-command')
-            os.write(fd,b'q');p.wait(timeout=4);self.assertEqual(p.returncode,0)
+            os.write(fd,b'q');self.wait_exit(fd,p);self.assertEqual(p.returncode,0)
 
     def test_hook_bridge_is_silent_and_filters_payload(self):
         with tempfile.TemporaryDirectory() as d:
